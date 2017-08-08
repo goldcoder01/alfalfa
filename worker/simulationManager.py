@@ -76,10 +76,15 @@ def process_invoke_action_message(message_body):
 
     # Start
     if action == 'start_simulation':
+
+        sp = SimProcess()
+        ep = mlep.MlepProcess()
+        ep.bcvtbDir = '/root/bcvtb/'
+        ep.env = {'BCVTB_HOME': '/root/bcvtb'}
+
         # Enhancement: Make this take arguments to a particular model (idf/osm)
         # Consider some global information to keep track of any simulation that is running
         time_step = 15  # Simulation time step
-        sp = SimProcess()
         if 'time_scale' in message_body:
             sp.step_time = time_step*3600/int(message_body['time_scale'])
         if 'start_date' in message_body:
@@ -101,15 +106,13 @@ def process_invoke_action_message(message_body):
         if 'id' in message_body:
             sp.site_ref = message_body['id']
 
+        print('Starting Simulation')
         print(sp.site_ref)
 
-        if not ep.is_running:
-            print('Starting Simulation')
-            start_simulation()
-            sp.start_time = time.time()
-            return True
-
-        return False
+        #sp.next_time = time.time()
+        start_simulation()
+        sp.start_time = time.time()
+        return True
     # Pause
     elif action == 'pause_simulation':
         # Enhancement: Make this take arguments to a particular model (idf/osm)
@@ -132,12 +135,10 @@ def process_invoke_action_message(message_body):
         return True
     # Add Site
     elif action == 'add_site':
-        if not ep.is_running:
-            print('Adding New Site...')
-            add_new_site(message_body['site_name'])
-            return True
+        print('Adding New Site...')
+        add_new_site(message_body['site_name'])
+        return True
 
-        return False
     # Unknown
     else:
         # Do nothing
@@ -254,6 +255,7 @@ def start_simulation():
             tar = tarfile.open(tarpath)
             tar.extractall(sim_path)
             tar.close()
+            os.remove(tarpath)
 
             call(['openstudio', 'translate_osm.rb', osmpath, sp.idf])
             copyfile(variables_path,variables_new_path)
@@ -305,10 +307,14 @@ def start_simulation():
 # ======================================================= MAIN ========================================================
 if __name__ == '__main__':
     # Initialized process
-    ep = mlep.MlepProcess()
-    ep.bcvtbDir = '/root/bcvtb/'
-    ep.env = {'BCVTB_HOME': '/root/bcvtb'}
-    sp = SimProcess()
+    #ep = mlep.MlepProcess()
+    #ep.bcvtbDir = '/root/bcvtb/'
+    #ep.env = {'BCVTB_HOME': '/root/bcvtb'}
+    #sp = SimProcess()
+
+    ep = None
+    sp = None
+
     if 'JOB_QUEUE_URL' in os.environ:
         local_flag = False
     else:
@@ -346,19 +352,21 @@ if __name__ == '__main__':
     while True:
         # WaitTimeSeconds triggers long polling that will wait for events to enter queue
         # Receive Message
-        messages = queue.receive_messages(MaxNumberOfMessages=1, WaitTimeSeconds=0)
-        if len(messages) > 0:
-            for msg in messages:
-                print('Got Message')
-                print(msg.body)
-            # Process Message
-            process_message(messages[0])
+        if not sp and not ep:
+            messages = queue.receive_messages(MaxNumberOfMessages=1, WaitTimeSeconds=0)
+            if len(messages) > 0:
+                for msg in messages:
+                    print('Got Message')
+                    print(msg.body)
+                # Process Message
+                process_message(messages[0])
 
+        curtime = time.time()
         # Step simulation in time
         # Adjust next real-time simulation step
-        sp.next_time = time.time()
-        if ep.is_running and (sp.sim_status == 1) and (ep.kStep < ep.MAX_STEPS) and \
-                (sp.next_time - sp.start_time >= sp.step_time):
+        if sp and ep and ep.is_running and (sp.sim_status == 1) and (ep.kStep < ep.MAX_STEPS) and \
+                (curtime - sp.start_time >= sp.step_time):
+            sp.next_time = curtime
             sp.start_time = time.time()
             packet = ep.read()
             if packet == '':
@@ -407,13 +415,15 @@ if __name__ == '__main__':
             ep.kStep = ep.kStep + 1
 
         # Check Stop
-        if (ep.is_running and (ep.kStep >= ep.MAX_STEPS)) or (sp.sim_status == 3 and ep.is_running):
+        if ( (sp and ep) and ((ep.is_running and (ep.kStep >= ep.MAX_STEPS)) or (sp.sim_status == 3 and ep.is_running)) ):
             ep.stop(True)
             ep.is_running = 0
             sp.sim_status = 0
             # TODO: Need to wait for a signal of some sort that E+ is done, before removing stuff
             time.sleep(5)
-            shutil.rmtree(sp.workflow_directory)
+            shutil.rmtree('/simulate')
+            ep = None
+            sp = None
             print('Simulation Terminated')
 
         # Done with simulation step
